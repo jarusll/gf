@@ -250,6 +250,7 @@ bool stackChanged;
 const char *pythonCode = R"(py
 
 import gdb.types
+import itertools
 def _gf_hook_string(basic_type):
     hook_string = str(basic_type)
     template_start = hook_string.find('<')
@@ -262,13 +263,63 @@ def _gf_basic_type(value):
         basic_type = gdb.types.get_basic_type(basic_type.target())
     return basic_type
 
+def _gf_visualizer(value):
+    lookup = getattr(gdb, 'default_visualizer', None)
+    if lookup is None: return None
+    basic = gdb.types.get_basic_type(value.type)
+    if basic.code == gdb.TYPE_CODE_PTR:
+        try:
+            pp = lookup(value.dereference())
+            if pp is not None: return pp
+        except Exception: pass
+        try:
+            pp = lookup(value)
+            if pp is not None: return pp
+        except Exception: pass
+        return None
+    try:
+        return lookup(value)
+    except Exception: return None
+
+def _gf_children(pp, limit=10000):
+    try: return list(itertools.islice(pp.children(), limit))
+    except Exception: return None
+
+def _gf_child(pp, index):
+    children = _gf_children(pp)
+    if children is None: return None
+    try:
+        if isinstance(index, str) and index[0] == '[' and index[-1] == ']':
+            i = int(index[1:-1])
+            return children[i][1] if 0 <= i < len(children) else None
+        if isinstance(index, int):
+            return children[index][1] if 0 <= index < len(children) else None
+        for name, child in children:
+            if str(name) == index: return child
+    except Exception: return None
+    return None
+
+def _gf_is_index_name(name):
+    s = str(name)
+    if s.startswith('[') and s.endswith(']'): s = s[1:-1]
+    return bool(s) and s.isdigit()
+
 def _gf_value(expression):
     try:
         value = gdb.parse_and_eval(expression[0])
         for index in expression[1:]:
             if isinstance(index, str) and index[0] == '[':
-                value = gf_hooks[_gf_hook_string(_gf_basic_type(value))](value, index)
-            else: value = value[index]
+                hook = gf_hooks.get(_gf_hook_string(_gf_basic_type(value))) if 'gf_hooks' in globals() else None
+                if hook is not None:
+                    value = hook(value, index)
+                    continue
+            pp = _gf_visualizer(value)
+            if pp is not None:
+                child = _gf_child(pp, index)
+                if child is not None:
+                    value = child
+                    continue
+            value = value[index]
         return value
     except gdb.error:
         print('??')
@@ -319,8 +370,22 @@ def gf_fields(expression):
     if value == None: return
     basic_type = _gf_basic_type(value)
     hook_string = _gf_hook_string(basic_type)
-    try: gf_hooks[hook_string](value, None)
-    except: __gf_fields_recurse(basic_type)
+    try:
+        gf_hooks[hook_string](value, None)
+        return
+    except Exception:
+        pass
+    pp = _gf_visualizer(value)
+    if pp is not None:
+        children = _gf_children(pp)
+        if children is not None:
+            if children and all(_gf_is_index_name(n) for n, _ in children):
+                print('(d_arr) %d' % len(children))
+            else:
+                for name, _ in children:
+                    print(name)
+            return
+    __gf_fields_recurse(basic_type)
 
 def gf_locals():
     try:
