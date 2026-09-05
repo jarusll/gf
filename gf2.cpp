@@ -304,6 +304,31 @@ def _gf_is_index_name(name):
     if s.startswith('[') and s.endswith(']'): s = s[1:-1]
     return bool(s) and s.isdigit()
 
+_gf_field_capability_cache = {}
+def _gf_has_fields(value):
+    basic_type = _gf_basic_type(value)
+    hook_string = _gf_hook_string(basic_type)
+    if 'gf_hooks' in globals() and hook_string in gf_hooks:
+        return True
+
+    pp = _gf_visualizer(value)
+    cache_key = (str(basic_type), str(type(pp)))
+    if cache_key in _gf_field_capability_cache:
+        return _gf_field_capability_cache[cache_key]
+
+    if pp is not None:
+        children = _gf_children(pp)
+        result = children is not None and bool(children)
+    elif basic_type.code == gdb.TYPE_CODE_ARRAY:
+        result = True
+    elif basic_type.code == gdb.TYPE_CODE_STRUCT or basic_type.code == gdb.TYPE_CODE_UNION:
+        result = any(True for _ in gdb.types.deep_items(basic_type))
+    else:
+        result = False
+
+    _gf_field_capability_cache[cache_key] = result
+    return result
+
 def _gf_value(expression):
     try:
         value = gdb.parse_and_eval(expression[0])
@@ -381,6 +406,7 @@ def gf_fields(expression):
         if children is not None:
             if children and all(_gf_is_index_name(n) for n, _ in children):
                 print('(d_arr) %d' % len(children))
+                print('(fields) ' + ''.join('1' if _gf_has_fields(child) else '0' for _, child in children))
             else:
                 for name, _ in children:
                     print(name)

@@ -1288,9 +1288,13 @@ void WatchAddFields(WatchWindow *w, Watch *watch) {
 
 		Watch *fields = (Watch *) calloc(count, sizeof(Watch));
 		watch->isArray = true;
-		bool hasSubFields = false;
+		bool isDynamicArray = strstr(evaluateResult, "(d_arr)");
+		char *capabilities = isDynamicArray ? strstr(evaluateResult, "\n(fields) ") : nullptr;
+		if (capabilities) capabilities += 10;
+		bool representativeChecked = false;
+		bool representativeHasFields = false;
 
-		if (strstr(evaluateResult, "(d_arr)")) {
+		if (isDynamicArray) {
 			watch->isDynamicArray = true;
 			w->dynamicArrays.Add(watch);
 		}
@@ -1300,8 +1304,15 @@ void WatchAddFields(WatchWindow *w, Watch *watch) {
 			fields[i].parent = watch;
 			fields[i].arrayIndex = i;
 			watch->fields.Add(&fields[i]);
-			if (!i) hasSubFields = WatchHasFields(&fields[i]);
-			fields[i].hasFields = hasSubFields;
+			if (capabilities && capabilities[i]) {
+				fields[i].hasFields = capabilities[i] == '1';
+			} else {
+				if (!representativeChecked) {
+					representativeHasFields = WatchHasFields(&fields[i]);
+					representativeChecked = true;
+				}
+				fields[i].hasFields = representativeHasFields;
+			}
 			fields[i].depth = watch->depth + 1;
 		}
 	} else {
