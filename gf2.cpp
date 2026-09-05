@@ -329,21 +329,37 @@ def _gf_fields_recurse(value):
     basic_type = _gf_basic_type(value)
     __gf_fields_recurse(basic_type)
 
-def gf_fields(expression):
+def gf_fields(expression, start=0):
     value = _gf_value(expression)
     if value == None: return
     basic_type = _gf_basic_type(value)
+    try:
+        printer = gdb.default_visualizer(value)
+        if printer != None:
+            try:
+                has_children = False
+                max_elements = gdb.parameter('print elements')
+                skipped = 0
+                child_count = 0
+                for child_name, child_value in printer.children():
+                    if skipped < start:
+                        skipped += 1
+                        continue
+                    if max_elements and child_count >= max_elements:
+                        print('[gf:load-more]')
+                        return
+                    print('[pp:%s]' % str(child_name))
+                    has_children = True
+                    child_count += 1
+                if has_children or start: return
+            except:
+                pass
+    except:
+        pass
+
     hook_string = _gf_hook_string(basic_type)
     try: gf_hooks[hook_string](value, None)
     except:
-        try:
-            printer = gdb.default_visualizer(value)
-            children = list(printer.children()) if printer != None else []
-            for child_name, child_value in children:
-                print('[pp:%s]' % str(child_name))
-            if children: return
-        except:
-            pass
         __gf_fields_recurse(basic_type)
 
 def gf_locals():

@@ -1061,10 +1061,11 @@ UIElement *ConsoleWindowCreate(UIElement *parent) {
 //////////////////////////////////////////////////////
 
 struct Watch {
-	bool open, hasFields, loadedFields, isArray, isDynamicArray;
+	bool open, hasFields, loadedFields, isArray, isDynamicArray, isLoadMore;
 	uint8_t depth;
 	char format;
 	uintptr_t arrayIndex;
+	uintptr_t fieldOffset;
 	char *key, *value, *type;
 	Array<Watch *> fields;
 	Watch *parent;
@@ -1208,7 +1209,7 @@ void WatchDeleteExpression(WatchWindow *w, bool fieldsOnly = false) {
 	if (!fieldsOnly) free(watch);
 }
 
-void WatchEvaluate(const char *function, Watch *watch) {
+void WatchEvaluate(const char *function, Watch *watch, uintptr_t fieldOffset = 0) {
 	char buffer[4096];
 	uintptr_t position = 0;
 
@@ -1245,6 +1246,9 @@ void WatchEvaluate(const char *function, Watch *watch) {
 	}
 
 	position += StringFormat(buffer + position, sizeof(buffer) - position, "]");
+	if (0 == strcmp(function, "gf_fields") && fieldOffset) {
+		position += StringFormat(buffer + position, sizeof(buffer) - position, ",%lu", fieldOffset);
+	}
 
 	if (0 == strcmp(function, "gf_valueof")) {
 		position += StringFormat(buffer + position, sizeof(buffer) - position, ",'%c'", watch->format ?: ' ');
@@ -1270,16 +1274,16 @@ bool WatchHasFields(Watch *watch) {
 	}
 }
 
-void WatchAddFields(WatchWindow *w, Watch *watch) {
-	if (watch->loadedFields) {
+void WatchAddFields(WatchWindow *w, Watch *watch, uintptr_t fieldOffset = 0) {
+	if (!fieldOffset && watch->loadedFields) {
 		return;
 	}
 
-	watch->loadedFields = true;
+	if (!fieldOffset) watch->loadedFields = true;
 
-	WatchEvaluate("gf_fields", watch);
+	WatchEvaluate("gf_fields", watch, fieldOffset);
 
-	if (strstr(evaluateResult, "(array)") || strstr(evaluateResult, "(d_arr)")) {
+	if (!fieldOffset && (strstr(evaluateResult, "(array)") || strstr(evaluateResult, "(d_arr)"))) {
 		int count = atoi(evaluateResult + 7);
 
 #define WATCH_ARRAY_MAX_FIELDS (10000000)
@@ -1288,7 +1292,6 @@ void WatchAddFields(WatchWindow *w, Watch *watch) {
 
 		Watch *fields = (Watch *) calloc(count, sizeof(Watch));
 		watch->isArray = true;
-		bool hasSubFields = false;
 
 		if (strstr(evaluateResult, "(d_arr)")) {
 			watch->isDynamicArray = true;
@@ -1300,30 +1303,61 @@ void WatchAddFields(WatchWindow *w, Watch *watch) {
 			fields[i].parent = watch;
 			fields[i].arrayIndex = i;
 			watch->fields.Add(&fields[i]);
-			if (!i) hasSubFields = WatchHasFields(&fields[i]);
-			fields[i].hasFields = hasSubFields;
+			// Check this array element only when the user opens it.
+			fields[i].hasFields = true;
 			fields[i].depth = watch->depth + 1;
 		}
 	} else {
 		char *start = strdup(evaluateResult);
 		char *position = start;
+		bool foundChildren = false;
+		bool foundMore = false;
 
 		while (true) {
 			char *end = strchr(position, '\n');
 			if (!end) break;
 			*end = 0;
 			if (strstr(position, "(gdb)")) break;
+			if (0 == strcmp(position, "[gf:load-more]")) {
+				foundMore = true;
+				position = end + 1;
+				continue;
+			}
+			if (!position[0]) {
+				position = end + 1;
+				continue;
+			}
 			Watch *field = (Watch *) calloc(1, sizeof(Watch));
 			field->depth = watch->depth + 1;
 			field->parent = watch;
 			field->key = (char *) malloc(end - position + 1);
 			strcpy(field->key, position);
 			watch->fields.Add(field);
-			field->hasFields = WatchHasFields(field);
+			// Check this child value only when the user opens it.
+			field->hasFields = true;
+			foundChildren = true;
 			position = end + 1;
 		}
 
+		if (foundMore) {
+			Watch *more = (Watch *) calloc(1, sizeof(Watch));
+			more->depth = watch->depth + 1;
+			more->parent = watch;
+			more->key = strdup("Load more...");
+			more->hasFields = true;
+			more->isLoadMore = true;
+			more->fieldOffset = watch->fields.Length();
+			watch->fields.Add(more);
+			foundChildren = true;
+		}
+
 		free(start);
+
+		if (!foundChildren && !watch->fields.Length()) {
+			// The opened value has no child values.
+			watch->hasFields = false;
+			watch->open = false;
+		}
 	}
 }
 
@@ -1340,8 +1374,8 @@ void WatchEnsureRowVisible(WatchWindow *w, int index) {
 	if (!unchanged) UIElementRefresh(w->element->parent);
 }
 
-void WatchInsertFieldRows2(WatchWindow *w, Watch *watch, Array<Watch *> *array) {
-	for (int i = 0; i < watch->fields.Length(); i++) {
+void WatchInsertFieldRows2(WatchWindow *w, Watch *watch, Array<Watch *> *array, int start = 0) {
+	for (int i = start; i < watch->fields.Length(); i++) {
 		array->Add(watch->fields[i]);
 		if (watch->fields[i]->open) WatchInsertFieldRows2(w, watch->fields[i], array);
 	}
@@ -1353,6 +1387,46 @@ void WatchInsertFieldRows(WatchWindow *w, Watch *watch, int position, bool ensur
 	w->rows.InsertMany(array.array, position, array.Length());
 	if (ensureLastVisible) WatchEnsureRowVisible(w, position + array.Length() - 1);
 	array.Free();
+}
+
+void WatchLoadMore(WatchWindow *w, Watch *more) {
+	if (!more->isLoadMore || !more->parent) return;
+
+	Watch *watch = more->parent;
+	int rowIndex = -1;
+	int fieldIndex = -1;
+
+	for (int i = 0; i < w->rows.Length(); i++) {
+		if (w->rows[i] == more) {
+			rowIndex = i;
+			break;
+		}
+	}
+
+	for (int i = 0; i < watch->fields.Length(); i++) {
+		if (watch->fields[i] == more) {
+			fieldIndex = i;
+			break;
+		}
+	}
+
+	if (rowIndex == -1 || fieldIndex == -1) return;
+
+	uintptr_t fieldOffset = more->fieldOffset;
+	int oldFieldCount = fieldIndex;
+	watch->fields.Delete(fieldIndex);
+	w->rows.Delete(rowIndex, 1);
+	WatchFree(w, more);
+	free(more);
+
+	WatchAddFields(w, watch, fieldOffset);
+
+	Array<Watch *> array = {};
+	WatchInsertFieldRows2(w, watch, &array, oldFieldCount);
+	w->rows.InsertMany(array.array, rowIndex, array.Length());
+	array.Free();
+	w->selectedRow = rowIndex;
+	WatchEnsureRowVisible(w, rowIndex);
 }
 
 void WatchAddExpression(WatchWindow *w, char *string = nullptr, bool selectNextRow = true) {
@@ -1901,7 +1975,7 @@ int WatchWindowMessage(UIElement *element, UIMessage message, int di, void *dp) 
 				Watch *watch = w->rows[i];
 				char buffer[256];
 
-				if ((!watch->value || watch->updateIndex != w->updateIndex) && !watch->open) {
+				if ((!watch->value || watch->updateIndex != w->updateIndex) && !watch->open && !watch->isLoadMore) {
 					if (!programRunning) {
 						free(watch->value);
 						watch->updateIndex = w->updateIndex;
@@ -1924,12 +1998,17 @@ int WatchWindowMessage(UIElement *element, UIMessage message, int di, void *dp) 
 				if (focused && w->waitingForFormatCharacter) {
 					StringFormat(buffer, sizeof(buffer), "Enter format character: (e.g. 'x' for hex)");
 				} else {
-					StringFormat(buffer, sizeof(buffer), "%.*s%s%s%s%s",
-							watch->depth * 3, "                                           ",
-							watch->open ? "v " : watch->hasFields ? "> " : "",
-							watch->key ?: keyIndex,
-							watch->open ? "" : " = ",
-							watch->open ? "" : watch->value);
+					if (watch->isLoadMore) {
+						StringFormat(buffer, sizeof(buffer), "%.*s> %s",
+								watch->depth * 3, "                                           ", watch->key);
+					} else {
+						StringFormat(buffer, sizeof(buffer), "%.*s%s%s%s%s",
+								watch->depth * 3, "                                           ",
+								watch->open ? "v " : watch->hasFields ? "> " : "",
+								watch->key ?: keyIndex,
+								watch->open ? "" : " = ",
+								watch->open ? "" : watch->value);
+					}
 				}
 
 				if (focused) {
@@ -2068,9 +2147,17 @@ int WatchWindowMessage(UIElement *element, UIMessage message, int di, void *dp) 
 				&& w->selectedRow != w->rows.Length() && w->rows[w->selectedRow]->hasFields
 				&& !w->rows[w->selectedRow]->open) {
 			Watch *watch = w->rows[w->selectedRow];
-			watch->open = true;
-			WatchAddFields(w, watch);
-			WatchInsertFieldRows(w, watch, w->selectedRow + 1, true);
+			if (watch->isLoadMore) {
+				WatchLoadMore(w, watch);
+			} else {
+				watch->open = true;
+				WatchAddFields(w, watch);
+				if (watch->hasFields) {
+					WatchInsertFieldRows(w, watch, w->selectedRow + 1, true);
+				} else {
+					watch->open = false;
+				}
+			}
 		} else if (m->code == UI_KEYCODE_LEFT && !w->textbox
 				&& w->selectedRow != w->rows.Length() && w->rows[w->selectedRow]->hasFields
 				&& w->rows[w->selectedRow]->open) {
