@@ -262,15 +262,30 @@ def _gf_basic_type(value):
         basic_type = gdb.types.get_basic_type(basic_type.target())
     return basic_type
 
+def _gf_pretty_child(value, field):
+    if not (isinstance(field, str) and field.startswith('[pp:') and field.endswith(']')):
+        return None
+    name = field[4:-1]
+    printer = gdb.default_visualizer(value)
+    if printer == None: return None
+    for child_name, child_value in printer.children():
+        if str(child_name) == name:
+            return child_value
+    return None
+
 def _gf_value(expression):
     try:
         value = gdb.parse_and_eval(expression[0])
         for index in expression[1:]:
             if isinstance(index, str) and index[0] == '[':
-                value = gf_hooks[_gf_hook_string(_gf_basic_type(value))](value, index)
+                pretty_value = _gf_pretty_child(value, index)
+                if pretty_value != None:
+                    value = pretty_value
+                else:
+                    value = gf_hooks[_gf_hook_string(_gf_basic_type(value))](value, index)
             else: value = value[index]
         return value
-    except gdb.error:
+    except:
         print('??')
         return None
 
@@ -320,7 +335,16 @@ def gf_fields(expression):
     basic_type = _gf_basic_type(value)
     hook_string = _gf_hook_string(basic_type)
     try: gf_hooks[hook_string](value, None)
-    except: __gf_fields_recurse(basic_type)
+    except:
+        try:
+            printer = gdb.default_visualizer(value)
+            children = list(printer.children()) if printer != None else []
+            for child_name, child_value in children:
+                print('[pp:%s]' % str(child_name))
+            if children: return
+        except:
+            pass
+        __gf_fields_recurse(basic_type)
 
 def gf_locals():
     try:
